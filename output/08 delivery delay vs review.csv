@@ -1,0 +1,7 @@
+delivery band,orders,share of orders pct,avg review,pct one or two stars
+1 early by 7 plus days,75744,79.04,4.31,9.0
+2 early or on time,13699,14.3,4.17,10.7
+3 late 1 to 3 days,1852,1.93,3.29,32.2
+4 late 4 to 7 days,1748,1.82,2.11,67.6
+5 late 8 to 14 days,1446,1.51,1.67,80.1
+6 late 15 plus days,1335,1.39,1.73,78.2

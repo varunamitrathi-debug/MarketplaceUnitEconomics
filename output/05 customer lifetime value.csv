@@ -1,0 +1,4 @@
+segment,customers,orders per customer,avg order value,gmv per customer,share of gmv pct
+one order,90557,1.0,137.96,137.96,94.49
+two or more,2801,2.11,123.02,260.05,5.51
+all customers,93358,1.03,137.04,141.62,100.0
