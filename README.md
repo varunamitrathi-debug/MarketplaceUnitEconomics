@@ -23,6 +23,131 @@ Definitions: a customer is a unique customer id (one real person), only delivere
 
 ![Review score by delivery delay](charts/delivery%20delay%20vs%20review.png)
 
+## SQL highlights
+
+Three of the twelve queries in `analysis.sql`, with the result each one returns. All results are real outputs from `run.py` on the Olist data.
+
+### Cohort retention with a CTE and date functions
+
+```sql
+-- 02 cohort retention
+-- Cohort = month of a customer's first delivered order.
+-- Retention in month N = share of the cohort that ordered again N months later.
+WITH d AS (
+  SELECT c.customer_unique_id AS cust,
+         DATE(o.order_purchase_timestamp, 'start of month') AS m
+  FROM orders o JOIN customers c ON c.customer_id = o.customer_id
+  WHERE o.order_status = 'delivered'
+),
+first AS (SELECT cust, MIN(m) AS cohort FROM d GROUP BY cust),
+activity AS (
+  SELECT DISTINCT f.cohort, d.cust,
+         (CAST(strftime('%Y', d.m) AS INT) - CAST(strftime('%Y', f.cohort) AS INT)) * 12
+       + (CAST(strftime('%m', d.m) AS INT) - CAST(strftime('%m', f.cohort) AS INT)) AS monthN
+  FROM d JOIN first f USING (cust)
+),
+size AS (SELECT cohort, COUNT(*) AS cohortSize FROM first GROUP BY cohort)
+SELECT a.cohort, s.cohortSize, a.monthN,
+       COUNT(DISTINCT a.cust) AS activeCustomers,
+       ROUND(100.0 * COUNT(DISTINCT a.cust) / s.cohortSize, 2) AS retentionPct
+FROM activity a JOIN size s USING (cohort)
+WHERE a.cohort BETWEEN '2017-01-01' AND '2018-06-01'
+GROUP BY a.cohort, a.monthN
+ORDER BY a.cohort, a.monthN;
+```
+
+Result (`output/03 cohort summary.csv`):
+
+| Month n | Avg retention % |
+|---|---|
+| 1 | 0.49 |
+| 2 | 0.35 |
+| 3 | 0.25 |
+| 4 | 0.32 |
+| 5 | 0.25 |
+| 6 | 0.27 |
+| 7 | 0.21 |
+| 8 | 0.21 |
+
+Average across 2017 cohorts: under half of one percent of customers order again the month after their first purchase.
+
+### Customer lifetime value by repeat behaviour
+
+```sql
+-- 05 customer lifetime value
+-- Historical value over the data window (about 23 months), in GMV.
+WITH ord AS (
+  SELECT o.order_id, c.customer_unique_id AS cust, SUM(i.price) AS gmv
+  FROM orders o
+  JOIN customers c ON c.customer_id = o.customer_id
+  JOIN items i ON i.order_id = o.order_id
+  WHERE o.order_status = 'delivered'
+  GROUP BY o.order_id
+),
+cust AS (SELECT cust, COUNT(*) AS nOrders, SUM(gmv) AS gmv FROM ord GROUP BY cust)
+SELECT CASE WHEN nOrders = 1 THEN 'one order' ELSE 'two or more' END AS segment,
+       COUNT(*) AS customers,
+       ROUND(AVG(nOrders), 2) AS ordersPerCustomer,
+       ROUND(SUM(gmv) / SUM(nOrders), 2) AS avgOrderValue,
+       ROUND(AVG(gmv), 2) AS gmvPerCustomer,
+       ROUND(100.0 * SUM(gmv) / (SELECT SUM(gmv) FROM cust), 2) AS shareOfGmvPct
+FROM cust GROUP BY 1
+UNION ALL
+SELECT 'all customers', COUNT(*), ROUND(AVG(nOrders), 2),
+       ROUND(SUM(gmv) / SUM(nOrders), 2), ROUND(AVG(gmv), 2), 100.0
+FROM cust;
+```
+
+Result (`output/05 customer lifetime value.csv`):
+
+| Segment | Customers | Orders per customer | Avg order value | GMV per customer | Share of GMV % |
+|---|---|---|---|---|---|
+| one order | 90,557 | 1 | 137.96 | 137.96 | 94.49 |
+| two or more | 2,801 | 2.11 | 123.02 | 260.05 | 5.51 |
+| all customers | 93,358 | 1.03 | 137.04 | 141.62 | 100 |
+
+Repeat customers are 3% of customers and 5.5% of GMV, so growth here depends on winning new customers rather than retention.
+
+### Late delivery against review score
+
+```sql
+-- 08 delivery delay vs review
+-- Days late = actual delivery date minus the estimated date promised at checkout.
+WITH o AS (
+  SELECT o.order_id,
+         JULIANDAY(DATE(o.order_delivered_customer_date)) - JULIANDAY(DATE(o.order_estimated_delivery_date)) AS daysLate
+  FROM orders o
+  WHERE o.order_status = 'delivered' AND o.order_delivered_customer_date IS NOT NULL
+),
+r AS (SELECT order_id, AVG(review_score) AS score FROM reviews GROUP BY order_id)
+SELECT CASE
+         WHEN daysLate <= -7 THEN '1 early by 7 plus days'
+         WHEN daysLate <= 0  THEN '2 early or on time'
+         WHEN daysLate <= 3  THEN '3 late 1 to 3 days'
+         WHEN daysLate <= 7  THEN '4 late 4 to 7 days'
+         WHEN daysLate <= 14 THEN '5 late 8 to 14 days'
+         ELSE                      '6 late 15 plus days' END AS deliveryBand,
+       COUNT(*) AS orders,
+       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS shareOfOrdersPct,
+       ROUND(AVG(r.score), 2) AS avgReview,
+       ROUND(100.0 * AVG(r.score <= 2), 1) AS pctOneOrTwoStars
+FROM o JOIN r USING (order_id)
+GROUP BY 1 ORDER BY 1;
+```
+
+Result (`output/08 delivery delay vs review.csv`):
+
+| Delivery band | Orders | Share of orders % | Avg review | Pct one or two stars |
+|---|---|---|---|---|
+| 1 early by 7 plus days | 75,744 | 79.04 | 4.31 | 9 |
+| 2 early or on time | 13,699 | 14.3 | 4.17 | 10.7 |
+| 3 late 1 to 3 days | 1,852 | 1.93 | 3.29 | 32.2 |
+| 4 late 4 to 7 days | 1,748 | 1.82 | 2.11 | 67.6 |
+| 5 late 8 to 14 days | 1,446 | 1.51 | 1.67 | 80.1 |
+| 6 late 15 plus days | 1,335 | 1.39 | 1.73 | 78.2 |
+
+Average review falls from 4.31 for early deliveries to 1.73 for deliveries 15 or more days late.
+
 ## Recommendations and estimated impact
 
 GMV over the same 23 month window. Value of one extra repeat customer = 1.11 extra orders x BRL 122.89 average repeat order = BRL 136.41, all from the data.
